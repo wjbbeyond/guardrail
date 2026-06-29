@@ -1,0 +1,47 @@
+server:
+  listen_addr: ":8080"
+  read_timeout: 15s
+  write_timeout: 0s
+  shutdown_timeout: 20s
+  log_level: info
+
+providers:
+  - name: openai
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_keys: []
+    models:
+      - gpt-4o
+      - gpt-4o-mini
+      - gpt-4.1
+      - gpt-4.1-mini
+  - name: anthropic
+    type: anthropic
+    base_url: https://api.anthropic.com/v1
+    api_keys: []
+    models:
+      - claude-3-5-sonnet
+      - claude-3-5-haiku
+  - name: google
+    type: google
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_keys: []
+    models:
+      - gemini-2.0-flash
+      - gemini-1.5-flash
+
+security:
+  prompt_injection_mode: warn
+  pii_mode: redact
+  extra_pii_patterns: []
+
+cost:
+  daily_budget_usd: 10
+  per_request_budget_usd: 1
+
+audit:
+  sqlite_dsn: "file:guardrail-audit.db?_pragma=busy_timeout(5000)"
+
+reliability:
+  max_retries: 1
+  provider_timeout: 60s

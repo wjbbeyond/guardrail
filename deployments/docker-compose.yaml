@@ -1,0 +1,17 @@
+services:
+  guardrail:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GUARDRAIL_AUDIT_SQLITE_DSN: "file:/data/audit.db?_pragma=busy_timeout(5000)"
+    volumes:
+      - guardrail-data:/data
+
+volumes:
+  guardrail-data:

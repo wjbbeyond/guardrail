@@ -1,0 +1,25 @@
+version: "3"
+
+vars:
+  BINARY: guardrail
+
+tasks:
+  default:
+    deps: [fmt, test, build]
+
+  fmt:
+    cmds:
+      - gofmt -w .
+
+  test:
+    cmds:
+      - go test -race -shuffle=on -count=1 ./...
+
+  build:
+    cmds:
+      - go build -trimpath -ldflags="-s -w" -o bin/{{.BINARY}} ./cmd/guardrail
+
+  run:
+    deps: [build]
+    cmds:
+      - ./bin/{{.BINARY}} -config configs/guardrail.yaml

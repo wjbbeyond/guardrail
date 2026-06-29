@@ -1,0 +1,29 @@
+server:
+  listen_addr: ":8080"
+  read_timeout: 15s
+  write_timeout: 0s
+  shutdown_timeout: 20s
+  log_level: info
+
+providers:
+  - name: openai
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_keys: []
+    models:
+      - gpt-4o-mini
+
+security:
+  prompt_injection_mode: warn
+  pii_mode: redact
+
+cost:
+  daily_budget_usd: 5
+  per_request_budget_usd: 0.25
+
+audit:
+  sqlite_dsn: "file:guardrail-audit.db?_pragma=busy_timeout(5000)"
+
+reliability:
+  max_retries: 1
+  provider_timeout: 60s
