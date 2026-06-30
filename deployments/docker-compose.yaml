@@ -9,6 +9,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GUARDRAIL_PROXY_API_KEY: ${GUARDRAIL_PROXY_API_KEY:?set an inbound proxy API key}
+      GUARDRAIL_ADMIN_API_KEY: ${GUARDRAIL_ADMIN_API_KEY:?set an admin API key}
       GUARDRAIL_AUDIT_SQLITE_DSN: "file:/data/audit.db?_pragma=busy_timeout(5000)"
     volumes:
       - guardrail-data:/data

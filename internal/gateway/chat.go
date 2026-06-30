@@ -60,7 +60,14 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
-	budget := s.costs.Allow(chat.Model, promptTokens, maxTokens)
+	budget, err := s.costs.Allow(r.Context(), chat.Model, promptTokens, maxTokens)
+	if err != nil {
+		s.metrics.RecordBlocked()
+		s.logger.ErrorContext(r.Context(), "evaluate budget", slog.Any("err", err))
+		writeError(w, http.StatusInternalServerError, "evaluate budget")
+		s.recordAudit(r.Context(), auditInput{start: start, route: r.URL.Path, model: chat.Model, status: http.StatusInternalServerError, action: security.ActionBlock, promptTokens: promptTokens})
+		return
+	}
 	if !budget.Allowed {
 		s.metrics.RecordBlocked()
 		writeJSON(w, http.StatusPaymentRequired, budget)
@@ -79,7 +86,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-GuardRail-Security", securityHeader(decision))
 	if upstream.Streaming {
 		s.writeStream(w, r, upstream)
-		usage := s.costs.Record(chat.Model, promptTokens, 0)
+		usage := s.recordUsage(r.Context(), chat.Model, promptTokens, 0)
 		s.metrics.RecordCost(usage.CostUSD)
 		s.recordAudit(r.Context(), auditInput{start: start, route: r.URL.Path, provider: upstream.Provider, model: chat.Model, status: upstream.Status, action: decision.Action, usage: usage})
 		return
@@ -91,9 +98,8 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.logger.ErrorContext(r.Context(), "write provider response", slog.Any("err", err))
 	}
 	completionTokens := cost.CompletionTokensFromOpenAI(upstream.Body)
-	usage := s.costs.Record(chat.Model, promptTokens, completionTokens)
+	usage := s.recordUsage(r.Context(), chat.Model, promptTokens, completionTokens)
 	s.metrics.RecordCost(usage.CostUSD)
-	usage.PromptTokens = promptTokens
 	s.recordAudit(r.Context(), auditInput{start: start, route: r.URL.Path, provider: upstream.Provider, model: chat.Model, status: upstream.Status, action: decision.Action, usage: usage})
 }
 
@@ -150,4 +156,17 @@ func (s *Server) writeStream(w http.ResponseWriter, r *http.Request, upstream *p
 		return
 	}
 	flusher.Flush()
+}
+
+func (s *Server) recordUsage(ctx context.Context, model string, promptTokens int, completionTokens int) cost.Usage {
+	usage, err := s.costs.Record(ctx, model, promptTokens, completionTokens)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "record cost usage", slog.Any("err", err))
+		return cost.Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			CostUSD:          cost.Price(model, promptTokens, completionTokens),
+		}
+	}
+	return usage
 }

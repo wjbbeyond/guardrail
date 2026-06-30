@@ -5,6 +5,11 @@ server:
   shutdown_timeout: 20s
   log_level: info
 
+auth:
+  enabled: true
+  proxy_api_keys: []
+  admin_api_keys: []
+
 providers:
   - name: openai
     type: openai

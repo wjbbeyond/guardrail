@@ -5,8 +5,13 @@ import (
 	"strconv"
 )
 
-func (s *Server) costsHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.costs.Snapshot())
+func (s *Server) costsHandler(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.costs.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read cost snapshot")
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) auditHandler(w http.ResponseWriter, r *http.Request) {

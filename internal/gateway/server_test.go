@@ -117,10 +117,109 @@ func TestServer_ChatCompletions_recordsPromptTokens_whenSecurityBlocksRequest(t 
 	}
 }
 
+func TestServer_ChatCompletions_rejectsRequest_whenProxyKeyIsMissing(t *testing.T) {
+	// Given
+	ctx := context.Background()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("upstream should not be called")
+	}))
+	defer upstream.Close()
+	server, _ := newTestServerWithConfig(t, ctx, upstream.URL, 10, func(cfg *config.Config) {
+		cfg.Auth = config.AuthConfig{
+			Enabled:      true,
+			ProxyAPIKeys: []string{"proxy-key"},
+			AdminAPIKeys: []string{"admin-key"},
+		}
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}`))
+	rec := httptest.NewRecorder()
+
+	// When
+	server.Handler().ServeHTTP(rec, req)
+
+	// Then
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServer_ChatCompletions_acceptsRequest_whenProxyKeyMatches(t *testing.T) {
+	// Given
+	ctx := context.Background()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","model":"gpt-4o-mini","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"completion_tokens":3}}`)
+	}))
+	defer upstream.Close()
+	server, _ := newTestServerWithConfig(t, ctx, upstream.URL, 10, func(cfg *config.Config) {
+		cfg.Auth = config.AuthConfig{
+			Enabled:      true,
+			ProxyAPIKeys: []string{"proxy-key"},
+			AdminAPIKeys: []string{"admin-key"},
+		}
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Authorization", "Bearer proxy-key")
+	rec := httptest.NewRecorder()
+
+	// When
+	server.Handler().ServeHTTP(rec, req)
+
+	// Then
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServer_AdminEndpoints_requireAdminKey_whenAuthEnabled(t *testing.T) {
+	// Given
+	ctx := context.Background()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("upstream should not be called")
+	}))
+	defer upstream.Close()
+	server, _ := newTestServerWithConfig(t, ctx, upstream.URL, 10, func(cfg *config.Config) {
+		cfg.Auth = config.AuthConfig{
+			Enabled:      true,
+			ProxyAPIKeys: []string{"proxy-key"},
+			AdminAPIKeys: []string{"admin-key"},
+		}
+	})
+
+	// When
+	missingKey := httptest.NewRecorder()
+	server.Handler().ServeHTTP(missingKey, httptest.NewRequest(http.MethodGet, "/v1/admin/costs", nil))
+	proxyKey := httptest.NewRecorder()
+	proxyReq := httptest.NewRequest(http.MethodGet, "/v1/admin/costs", nil)
+	proxyReq.Header.Set("Authorization", "Bearer proxy-key")
+	server.Handler().ServeHTTP(proxyKey, proxyReq)
+	adminKey := httptest.NewRecorder()
+	adminReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	adminReq.Header.Set(adminAPIKeyHeader, "admin-key")
+	server.Handler().ServeHTTP(adminKey, adminReq)
+
+	// Then
+	if missingKey.Code != http.StatusUnauthorized {
+		t.Fatalf("missing key status = %d, want 401", missingKey.Code)
+	}
+	if proxyKey.Code != http.StatusUnauthorized {
+		t.Fatalf("proxy key status = %d, want 401", proxyKey.Code)
+	}
+	if adminKey.Code != http.StatusOK {
+		t.Fatalf("admin key status = %d, want 200; body=%s", adminKey.Code, adminKey.Body.String())
+	}
+}
+
 func newTestServer(t *testing.T, ctx context.Context, upstreamURL string, dailyBudget float64) (*Server, *audit.Store) {
+	t.Helper()
+	return newTestServerWithConfig(t, ctx, upstreamURL, dailyBudget, nil)
+}
+
+func newTestServerWithConfig(t *testing.T, ctx context.Context, upstreamURL string, dailyBudget float64, mutate func(*config.Config)) (*Server, *audit.Store) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Server.ListenAddr = "127.0.0.1:0"
+	cfg.Auth.Enabled = false
 	cfg.Audit.SQLiteDSN = "file:" + t.TempDir() + "/audit.db?_pragma=busy_timeout(5000)"
 	cfg.Cost.DailyBudgetUSD = dailyBudget
 	cfg.Cost.PerRequestBudgetUSD = 10
@@ -133,6 +232,9 @@ func newTestServer(t *testing.T, ctx context.Context, upstreamURL string, dailyB
 		APIKeys: []string{"test-key"},
 		Models:  []string{"gpt-4o", "gpt-4o-mini"},
 	}}
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	store, err := audit.Open(ctx, cfg.Audit.SQLiteDSN)
 	if err != nil {
 		t.Fatalf("open audit: %v", err)

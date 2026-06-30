@@ -19,6 +19,26 @@ server:
 
 `write_timeout: 0s` allows long LLM streams.
 
+## Auth
+
+```yaml
+auth:
+  enabled: true
+  proxy_api_keys:
+    - gr_proxy_...
+  admin_api_keys:
+    - gr_admin_...
+```
+
+When auth is enabled, `POST /v1/chat/completions` requires a proxy key via `Authorization: Bearer <key>` or `X-GuardRail-API-Key`. Admin endpoints and `/metrics` require an admin key via `Authorization: Bearer <key>` or `X-GuardRail-Admin-Key`.
+
+Environment variables can provide one key or a comma-separated list:
+
+- `GUARDRAIL_PROXY_API_KEY`
+- `GUARDRAIL_PROXY_API_KEYS`
+- `GUARDRAIL_ADMIN_API_KEY`
+- `GUARDRAIL_ADMIN_API_KEYS`
+
 ## Providers
 
 ```yaml
@@ -63,3 +83,4 @@ cost:
 ```
 
 Budgets use model price estimates and approximate token counting before the request. Provider `usage` fields improve completion-token accounting after the response.
+Daily spend is persisted to the configured SQLite database, so restarting GuardRail does not reset the active daily budget.

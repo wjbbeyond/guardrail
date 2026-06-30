@@ -1,7 +1,9 @@
 package cost
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -38,40 +40,54 @@ type Snapshot struct {
 	RequestBudgetUSD float64 `json:"request_budget_usd"`
 }
 
+type spendLedger interface {
+	AddSpend(ctx context.Context, day string, amount float64) error
+	Spend(ctx context.Context, day string) (float64, error)
+}
+
 type Tracker struct {
 	mu         sync.Mutex
 	clock      Clock
 	daily      float64
 	perReq     float64
 	spendByDay map[string]float64
+	ledger     spendLedger
 }
 
 func NewTracker(cfg config.CostConfig, clock Clock) *Tracker {
+	return NewTrackerWithLedger(cfg, clock, nil)
+}
+
+func NewTrackerWithLedger(cfg config.CostConfig, clock Clock, ledger spendLedger) *Tracker {
 	return &Tracker{
 		clock:      clock,
 		daily:      cfg.DailyBudgetUSD,
 		perReq:     cfg.PerRequestBudgetUSD,
 		spendByDay: make(map[string]float64),
+		ledger:     ledger,
 	}
 }
 
-func (t *Tracker) Allow(model string, promptTokens int, maxCompletionTokens int) Decision {
+func (t *Tracker) Allow(ctx context.Context, model string, promptTokens int, maxCompletionTokens int) (Decision, error) {
 	estimated := Price(model, promptTokens, maxCompletionTokens)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	day := t.day()
-	spent := t.spendByDay[day]
+	spent, err := t.spentForDay(ctx, day)
+	if err != nil {
+		return Decision{}, err
+	}
 	if t.perReq > 0 && estimated > t.perReq {
-		return Decision{Allowed: false, Reason: "per_request_budget_exceeded", Spent: estimated, Limit: t.perReq}
+		return Decision{Allowed: false, Reason: "per_request_budget_exceeded", Spent: estimated, Limit: t.perReq}, nil
 	}
 	if t.daily > 0 && spent+estimated > t.daily {
-		return Decision{Allowed: false, Reason: "daily_budget_exceeded", Spent: spent, Limit: t.daily}
+		return Decision{Allowed: false, Reason: "daily_budget_exceeded", Spent: spent, Limit: t.daily}, nil
 	}
-	return Decision{Allowed: true, Spent: spent, Limit: t.daily}
+	return Decision{Allowed: true, Spent: spent, Limit: t.daily}, nil
 }
 
-func (t *Tracker) Record(model string, promptTokens int, completionTokens int) Usage {
+func (t *Tracker) Record(ctx context.Context, model string, promptTokens int, completionTokens int) (Usage, error) {
 	usage := Usage{
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
@@ -79,24 +95,52 @@ func (t *Tracker) Record(model string, promptTokens int, completionTokens int) U
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.spendByDay[t.day()] += usage.CostUSD
-	return usage
+	day := t.day()
+	if t.ledger != nil {
+		if err := t.ledger.AddSpend(ctx, day, usage.CostUSD); err != nil {
+			return Usage{}, fmt.Errorf("record spend: %w", err)
+		}
+		spent, err := t.ledger.Spend(ctx, day)
+		if err != nil {
+			return Usage{}, fmt.Errorf("read recorded spend: %w", err)
+		}
+		t.spendByDay[day] = spent
+		return usage, nil
+	}
+	t.spendByDay[day] += usage.CostUSD
+	return usage, nil
 }
 
-func (t *Tracker) Snapshot() Snapshot {
+func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	day := t.day()
+	spent, err := t.spentForDay(ctx, day)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	return Snapshot{
 		Day:              day,
-		SpentUSD:         t.spendByDay[day],
+		SpentUSD:         spent,
 		DailyBudgetUSD:   t.daily,
 		RequestBudgetUSD: t.perReq,
-	}
+	}, nil
 }
 
 func (t *Tracker) day() string {
 	return t.clock.Now().Format("2006-01-02")
+}
+
+func (t *Tracker) spentForDay(ctx context.Context, day string) (float64, error) {
+	if t.ledger == nil {
+		return t.spendByDay[day], nil
+	}
+	spent, err := t.ledger.Spend(ctx, day)
+	if err != nil {
+		return 0, fmt.Errorf("read spend: %w", err)
+	}
+	t.spendByDay[day] = spent
+	return spent, nil
 }
 
 func EstimateTokens(text string) int {

@@ -37,6 +37,11 @@ func Execute(ctx context.Context, args []string) error {
 		return fmt.Errorf("open audit store: %w", err)
 	}
 	defer auditor.Close()
+	costLedger, err := cost.OpenSQLiteLedger(ctx, cfg.Audit.SQLiteDSN)
+	if err != nil {
+		return fmt.Errorf("open cost ledger: %w", err)
+	}
+	defer costLedger.Close()
 
 	router, err := provider.NewRouter(cfg.Providers, cfg.Reliability.ProviderTimeout)
 	if err != nil {
@@ -47,7 +52,7 @@ func Execute(ctx context.Context, args []string) error {
 		Config:  cfg,
 		Router:  router,
 		Guard:   security.NewGuard(cfg.Security),
-		Costs:   cost.NewTracker(cfg.Cost, cost.RealClock{}),
+		Costs:   cost.NewTrackerWithLedger(cfg.Cost, cost.RealClock{}, costLedger),
 		Audit:   auditor,
 		Metrics: metrics.NewRegistry(),
 		Logger:  logger,

@@ -2,6 +2,10 @@
 
 GuardRail v0.1 focuses on low-latency deterministic controls.
 
+## Inbound Auth
+
+GuardRail separates inbound client access from upstream provider credentials. Clients call the proxy with a GuardRail proxy API key, while provider API keys stay in server-side config. Admin endpoints and `/metrics` use a separate admin key set.
+
 ## Prompt Injection
 
 The gateway scans prompt text for common prompt-injection patterns:
@@ -40,3 +44,7 @@ Each request records:
 - latency
 
 Audit data is stored in SQLite by default.
+
+## Cost State
+
+Daily spend is also persisted in SQLite. This prevents a process restart from resetting active daily budget enforcement.

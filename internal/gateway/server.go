@@ -52,7 +52,7 @@ func New(deps Dependencies) *Server {
 	mux.HandleFunc("GET /v1/admin/costs", server.costsHandler)
 	mux.HandleFunc("GET /v1/admin/audit", server.auditHandler)
 	mux.HandleFunc("POST /v1/chat/completions", server.chatCompletions)
-	server.handler = withRequestID(mux)
+	server.handler = withRequestID(server.withAuth(mux))
 	return server
 }
 
@@ -78,7 +78,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.Server.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.Server.ShutdownTimeout)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown http server: %w", err)
