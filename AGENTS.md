@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Go 1.23+ HTTP reverse proxy for OpenAI-compatible AI Agent traffic.
+Go 1.24+ HTTP reverse proxy for OpenAI-compatible AI Agent traffic.
 
 ## Commands
 - `make fmt` — format Go files.

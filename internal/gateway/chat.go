@@ -33,12 +33,13 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	promptTokens := cost.EstimateTokens(chat.PromptText())
 	decision := s.guard.Inspect(chat.PromptText())
 	if decision.Action == security.ActionBlock {
 		s.metrics.RecordBlocked()
 		w.Header().Set("X-GuardRail-Security", securityHeader(decision))
 		writeError(w, http.StatusForbidden, "request blocked by GuardRail security policy")
-		s.recordAudit(r.Context(), auditInput{start: start, route: r.URL.Path, model: chat.Model, status: http.StatusForbidden, action: decision.Action})
+		s.recordAudit(r.Context(), auditInput{start: start, route: r.URL.Path, model: chat.Model, status: http.StatusForbidden, action: decision.Action, promptTokens: promptTokens})
 		return
 	}
 
@@ -52,9 +53,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "redacted request is not valid JSON")
 			return
 		}
+		promptTokens = cost.EstimateTokens(chat.PromptText())
 	}
 
-	promptTokens := cost.EstimateTokens(chat.PromptText())
 	maxTokens := chat.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 1024

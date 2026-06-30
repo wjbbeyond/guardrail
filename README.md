@@ -54,6 +54,8 @@ The default config lives at `configs/guardrail.yaml`. Provider API keys can be s
 
 ## Development
 
+GuardRail requires Go 1.24+.
+
 ```bash
 make fmt
 make test
