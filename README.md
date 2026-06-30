@@ -1,6 +1,19 @@
 # GuardRail
 
-GuardRail is a lightweight AI Agent safety gateway. It sits between agent apps and LLM providers, then adds three controls that raw provider SDKs do not give you by default: prompt/PII guardrails, spend budgets, and provider failover.
+[![CI](https://github.com/wjbbeyond/guardrail/actions/workflows/ci.yaml/badge.svg)](https://github.com/wjbbeyond/guardrail/actions/workflows/ci.yaml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+
+GuardRail is a lightweight AI Agent safety gateway. Put it between your agent app and LLM providers to add prompt/PII guardrails, tenant budgets, rate limits, SSO, audit logs, and provider failover.
+
+It is designed for zero-rewrite adoption: keep your existing OpenAI-compatible client, point its `base_url` at GuardRail, and use a GuardRail proxy key instead of giving every app direct provider credentials.
+
+## Why GuardRail
+
+- Add safety controls without rewriting agent code.
+- Keep provider API keys server-side, outside agent apps.
+- Enforce tenant-level budgets and rate limits before traffic reaches the model.
+- Fail over across compatible providers when upstreams return `429` or `5xx`.
+- Keep an auditable SQLite trail for prompts, security actions, usage, and cost.
 
 ## Features
 
@@ -21,6 +34,8 @@ GuardRail is a lightweight AI Agent safety gateway. It sits between agent apps a
 
 ## Quick Start
 
+Three-minute local path:
+
 ```bash
 export OPENAI_API_KEY="sk-..."
 export GUARDRAIL_PROXY_API_KEY="dev-proxy-key"
@@ -28,7 +43,7 @@ export GUARDRAIL_ADMIN_API_KEY="dev-admin-key"
 go run ./cmd/guardrail -config configs/guardrail.yaml
 ```
 
-Send a request through GuardRail:
+Send the same OpenAI-compatible request through GuardRail:
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -38,6 +53,13 @@ curl http://localhost:8080/v1/chat/completions \
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello from GuardRail"}]
   }'
+```
+
+In SDKs, the only required client-side change is usually:
+
+```text
+base_url = "http://localhost:8080/v1"
+api_key = "dev-proxy-key"
 ```
 
 Health and operations:
@@ -73,6 +95,10 @@ The default config lives at `configs/guardrail.yaml`. Provider API keys can be s
 
 See `docs/configuration.md` for tenant, OIDC, rate-limit, pricing, and migration details. See `docs/ha-deployment.md` for the recommended HA topology and current state boundaries.
 
+## Project Direction
+
+See `ROADMAP.md` for the project goals, release direction, and current non-goals. Contributions are welcome; start with `CONTRIBUTING.md`.
+
 ## Development
 
 GuardRail requires Go 1.25+.
@@ -83,9 +109,9 @@ make test
 make build
 ```
 
-## MVP Scope
+## v0.1.0 Scope
 
-This repository is v0.1.0 scope from the development plan: proxy, routing, security rules, PII redaction, cost circuit breakers, audit logs, metrics, Docker, CI, and documentation. Dashboard, semantic cache, tool-call RBAC, compliance reports, and K8s operator are planned for later versions.
+GuardRail v0.1.0 includes proxying, provider routing, security rules, PII redaction, tenant budgets, tenant rate limits, OIDC/SSO, audit logs, metrics, Docker, CI, and deployment documentation. Dashboard, semantic cache, tool-call RBAC, compliance reports, and K8s operator support are planned for later versions.
 
 ## License
 
