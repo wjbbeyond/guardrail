@@ -6,7 +6,9 @@ GuardRail is a reverse proxy for AI Agent traffic. Agents keep using the OpenAI-
 flowchart LR
   A["AI Agent"] --> B["GuardRail /v1/chat/completions"]
   B --> C["Inbound Auth"]
-  C --> D["Security Guard"]
+  C --> M["Tenant Identity"]
+  M --> N["Tenant Rate Limit"]
+  N --> D["Security Guard"]
   D --> E["Cost Circuit Breaker"]
   E --> F["Provider Router"]
   E --> K["SQLite Cost Ledger"]
@@ -19,15 +21,17 @@ flowchart LR
 
 ## Request Flow
 
-1. Require a valid proxy API key for chat requests when auth is enabled.
-2. Decode the OpenAI-compatible chat request.
-3. Inspect prompt text for prompt injection and PII findings.
-4. Redact PII when configured.
-5. Estimate prompt and completion tokens before sending upstream.
-6. Reject requests that would exceed per-request or daily budget using persisted daily spend.
-7. Route to matching providers by model, failing over on `429` and `5xx`.
-8. Copy provider responses back to the caller.
-9. Record cost, metrics, and audit events.
+1. Require a valid proxy API key or OIDC token for chat requests when auth is enabled.
+2. Resolve tenant identity from the API key mapping or OIDC tenant claim.
+3. Apply the tenant rate limit before reading the request body.
+4. Decode the OpenAI-compatible chat request.
+5. Inspect prompt text for prompt injection and PII findings.
+6. Redact PII when configured.
+7. Estimate prompt and completion tokens before sending upstream.
+8. Reject requests that would exceed tenant per-request or daily budget using persisted daily spend.
+9. Route to matching providers by model, failing over on `429` and `5xx`.
+10. Copy provider responses back to the caller.
+11. Record tenant cost, metrics, and audit events.
 
 ## Provider Adapters
 

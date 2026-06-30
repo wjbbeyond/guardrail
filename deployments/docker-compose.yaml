@@ -11,6 +11,9 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GUARDRAIL_PROXY_API_KEY: ${GUARDRAIL_PROXY_API_KEY:?set an inbound proxy API key}
       GUARDRAIL_ADMIN_API_KEY: ${GUARDRAIL_ADMIN_API_KEY:?set an admin API key}
+      GUARDRAIL_OIDC_ISSUER_URL: ${GUARDRAIL_OIDC_ISSUER_URL:-}
+      GUARDRAIL_OIDC_CLIENT_ID: ${GUARDRAIL_OIDC_CLIENT_ID:-}
+      GUARDRAIL_OIDC_TENANT_CLAIM: ${GUARDRAIL_OIDC_TENANT_CLAIM:-tenant}
       GUARDRAIL_AUDIT_SQLITE_DSN: "file:/data/audit.db?_pragma=busy_timeout(5000)"
     volumes:
       - guardrail-data:/data

@@ -6,6 +6,7 @@ HOST="${GUARDRAIL_DEMO_HOST:-127.0.0.1}"
 PORT="${GUARDRAIL_DEMO_PORT:-18080}"
 UPSTREAM_PORT="${GUARDRAIL_DEMO_UPSTREAM_PORT:-18081}"
 PROXY_KEY="${GUARDRAIL_DEMO_PROXY_KEY:-demo-proxy-key}"
+LIMITED_KEY="${GUARDRAIL_DEMO_LIMITED_KEY:-demo-limited-key}"
 ADMIN_KEY="${GUARDRAIL_DEMO_ADMIN_KEY:-demo-admin-key}"
 WORKDIR="$(mktemp -d)"
 UPSTREAM_PID=""
@@ -38,6 +39,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
+            return
+        if self.path == "/pricing.json":
+            body = json.dumps({
+                "models": {
+                    "gpt-4o-mini": {"input_per_mtok": 0.15, "output_per_mtok": 0.60},
+                    "gpt-4o": {"input_per_mtok": 2.50, "output_per_mtok": 10.00},
+                }
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         self.send_response(404)
         self.end_headers()
@@ -95,10 +109,36 @@ server:
 
 auth:
   enabled: true
-  proxy_api_keys:
-    - "$PROXY_KEY"
+  proxy_api_keys: []
   admin_api_keys:
     - "$ADMIN_KEY"
+  oidc:
+    enabled: false
+    issuer_url: ""
+    client_id: ""
+    tenant_claim: tenant
+    admin_group_claim: groups
+    admin_groups: []
+
+tenants:
+  - id: demo
+    proxy_api_keys:
+      - "$PROXY_KEY"
+    daily_budget_usd: 0.05
+    per_request_budget_usd: 0.002
+    rate_limit:
+      enabled: true
+      requests_per_minute: 120
+      burst: 20
+  - id: limited
+    proxy_api_keys:
+      - "$LIMITED_KEY"
+    daily_budget_usd: 0.05
+    per_request_budget_usd: 0.002
+    rate_limit:
+      enabled: true
+      requests_per_minute: 1
+      burst: 1
 
 providers:
   - name: mock
@@ -118,6 +158,15 @@ security:
 cost:
   daily_budget_usd: 0.05
   per_request_budget_usd: 0.002
+
+rate_limit:
+  enabled: true
+  requests_per_minute: 120
+  burst: 20
+
+pricing:
+  url: http://$HOST:$UPSTREAM_PORT/pricing.json
+  refresh_interval: 1h
 
 audit:
   sqlite_dsn: "file:$WORKDIR/guardrail.db?_pragma=busy_timeout(5000)"
@@ -222,13 +271,30 @@ status="$(curl -sS -o "$body" -w "%{http_code}" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"generate a long analysis"}],"max_tokens":1000}')"
 expect_status "$status" "402" "per-request budget blocks expensive calls" "$body"
 
+body="$WORKDIR/rate-1.json"
+status="$(curl -sS -o "$body" -w "%{http_code}" \
+  -X POST "http://$HOST:$PORT/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LIMITED_KEY" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"first limited request"}],"max_tokens":20}')"
+expect_status "$status" "200" "tenant limited key allows first burst request" "$body"
+
+body="$WORKDIR/rate-2.json"
+status="$(curl -sS -o "$body" -w "%{http_code}" \
+  -X POST "http://$HOST:$PORT/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LIMITED_KEY" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"second limited request"}],"max_tokens":20}')"
+expect_status "$status" "429" "tenant rate limit blocks burst overflow" "$body"
+
 body="$WORKDIR/costs.json"
 status="$(curl -sS -o "$body" -w "%{http_code}" \
-  "http://$HOST:$PORT/v1/admin/costs" \
+  "http://$HOST:$PORT/v1/admin/costs?tenant_id=demo" \
   -H "X-GuardRail-Admin-Key: $ADMIN_KEY")"
 expect_status "$status" "200" "admin cost endpoint accepts admin key" "$body"
 grep -q "spent_usd" "$body"
-echo "ok - persisted cost snapshot is readable"
+grep -q '"tenant_id":"demo"' "$body"
+echo "ok - persisted tenant cost snapshot is readable"
 
 body="$WORKDIR/audit.json"
 status="$(curl -sS -o "$body" -w "%{http_code}" \

@@ -9,6 +9,15 @@ auth:
   enabled: true
   proxy_api_keys: []
   admin_api_keys: []
+  oidc:
+    enabled: false
+    issuer_url: ""
+    client_id: ""
+    tenant_claim: tenant
+    admin_group_claim: groups
+    admin_groups: []
+
+tenants: []
 
 providers:
   - name: openai
@@ -25,6 +34,15 @@ security:
 cost:
   daily_budget_usd: 5
   per_request_budget_usd: 0.25
+
+rate_limit:
+  enabled: true
+  requests_per_minute: 60
+  burst: 10
+
+pricing:
+  url: ""
+  refresh_interval: 24h
 
 audit:
   sqlite_dsn: "file:guardrail-audit.db?_pragma=busy_timeout(5000)"

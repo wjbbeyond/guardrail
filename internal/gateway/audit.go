@@ -13,6 +13,7 @@ import (
 
 type auditInput struct {
 	start        time.Time
+	tenantID     string
 	route        string
 	provider     string
 	model        string
@@ -34,6 +35,7 @@ func (s *Server) recordAudit(ctx context.Context, input auditInput) {
 	event := audit.Event{
 		Timestamp:        time.Now().UTC(),
 		RequestID:        requestID(ctx),
+		TenantID:         input.tenantID,
 		Route:            input.route,
 		Provider:         input.provider,
 		Model:            input.model,

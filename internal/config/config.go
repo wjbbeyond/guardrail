@@ -6,71 +6,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
-
-type ProviderType string
-
-const (
-	ProviderOpenAICompatible ProviderType = "openai-compatible"
-	ProviderOpenAI           ProviderType = "openai"
-	ProviderAnthropic        ProviderType = "anthropic"
-	ProviderGoogle           ProviderType = "google"
-)
-
-type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	Auth        AuthConfig        `yaml:"auth"`
-	Providers   []ProviderConfig  `yaml:"providers"`
-	Security    SecurityConfig    `yaml:"security"`
-	Cost        CostConfig        `yaml:"cost"`
-	Audit       AuditConfig       `yaml:"audit"`
-	Reliability ReliabilityConfig `yaml:"reliability"`
-}
-
-type ServerConfig struct {
-	ListenAddr      string        `yaml:"listen_addr"`
-	ReadTimeout     time.Duration `yaml:"read_timeout"`
-	WriteTimeout    time.Duration `yaml:"write_timeout"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
-	LogLevel        string        `yaml:"log_level"`
-}
-
-type AuthConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	ProxyAPIKeys []string `yaml:"proxy_api_keys"`
-	AdminAPIKeys []string `yaml:"admin_api_keys"`
-}
-
-type ProviderConfig struct {
-	Name    string       `yaml:"name"`
-	Type    ProviderType `yaml:"type"`
-	BaseURL string       `yaml:"base_url"`
-	APIKeys []string     `yaml:"api_keys"`
-	Models  []string     `yaml:"models"`
-}
-
-type SecurityConfig struct {
-	PromptInjectionMode string   `yaml:"prompt_injection_mode"`
-	PIIMode             string   `yaml:"pii_mode"`
-	ExtraPIIPatterns    []string `yaml:"extra_pii_patterns"`
-}
-
-type CostConfig struct {
-	DailyBudgetUSD      float64 `yaml:"daily_budget_usd"`
-	PerRequestBudgetUSD float64 `yaml:"per_request_budget_usd"`
-}
-
-type AuditConfig struct {
-	SQLiteDSN string `yaml:"sqlite_dsn"`
-}
-
-type ReliabilityConfig struct {
-	MaxRetries      int           `yaml:"max_retries"`
-	ProviderTimeout time.Duration `yaml:"provider_timeout"`
-}
 
 func Load(path string) (Config, error) {
 	cfg := Default()
@@ -97,44 +35,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func Default() Config {
-	return Config{
-		Server: ServerConfig{
-			ListenAddr:      ":8080",
-			ReadTimeout:     15 * time.Second,
-			WriteTimeout:    0,
-			ShutdownTimeout: 20 * time.Second,
-			LogLevel:        "info",
-		},
-		Auth: AuthConfig{
-			Enabled: true,
-		},
-		Providers: []ProviderConfig{
-			{
-				Name:    "openai",
-				Type:    ProviderOpenAI,
-				BaseURL: "https://api.openai.com/v1",
-				Models:  []string{"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"},
-			},
-		},
-		Security: SecurityConfig{
-			PromptInjectionMode: "warn",
-			PIIMode:             "redact",
-		},
-		Cost: CostConfig{
-			DailyBudgetUSD:      10,
-			PerRequestBudgetUSD: 1,
-		},
-		Audit: AuditConfig{
-			SQLiteDSN: "file:guardrail-audit.db?_pragma=busy_timeout(5000)",
-		},
-		Reliability: ReliabilityConfig{
-			MaxRetries:      1,
-			ProviderTimeout: 60 * time.Second,
-		},
-	}
-}
-
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Server.ListenAddr) == "" {
 		return errors.New("config: server.listen_addr is required")
@@ -142,8 +42,17 @@ func (c Config) Validate() error {
 	if len(c.Providers) == 0 {
 		return errors.New("config: at least one provider is required")
 	}
-	if err := validateAuth(c.Auth); err != nil {
+	if err := validateTenants(c.Tenants); err != nil {
 		return err
+	}
+	if err := validateAuth(c.Auth, c.Tenants); err != nil {
+		return err
+	}
+	if err := validateRateLimit(c.RateLimit, "rate_limit"); err != nil {
+		return err
+	}
+	if c.Pricing.RefreshInterval < 0 {
+		return errors.New("config: pricing.refresh_interval must not be negative")
 	}
 	for _, provider := range c.Providers {
 		if err := validateProvider(provider); err != nil {
@@ -159,15 +68,66 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func validateAuth(auth AuthConfig) error {
+func validateAuth(auth AuthConfig, tenants []TenantConfig) error {
 	if !auth.Enabled {
 		return nil
 	}
-	if len(nonEmptyStrings(auth.ProxyAPIKeys)) == 0 {
-		return errors.New("config: auth.proxy_api_keys is required when auth.enabled is true")
-	}
 	if len(nonEmptyStrings(auth.AdminAPIKeys)) == 0 {
 		return errors.New("config: auth.admin_api_keys is required when auth.enabled is true")
+	}
+	if auth.OIDC.Enabled {
+		if strings.TrimSpace(auth.OIDC.IssuerURL) == "" {
+			return errors.New("config: auth.oidc.issuer_url is required when auth.oidc.enabled is true")
+		}
+		if strings.TrimSpace(auth.OIDC.ClientID) == "" {
+			return errors.New("config: auth.oidc.client_id is required when auth.oidc.enabled is true")
+		}
+	}
+	if len(nonEmptyStrings(auth.ProxyAPIKeys)) == 0 && !hasTenantProxyKeys(tenants) && !auth.OIDC.Enabled {
+		return errors.New("config: auth.proxy_api_keys or auth.oidc is required when auth.enabled is true")
+	}
+	return nil
+}
+
+func hasTenantProxyKeys(tenants []TenantConfig) bool {
+	for _, tenant := range tenants {
+		if len(nonEmptyStrings(tenant.ProxyAPIKeys)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func validateTenants(tenants []TenantConfig) error {
+	seen := make(map[string]struct{}, len(tenants))
+	for _, tenant := range tenants {
+		id := strings.TrimSpace(tenant.ID)
+		if id == "" {
+			return errors.New("config: tenant.id is required")
+		}
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("config: duplicate tenant id %q", id)
+		}
+		seen[id] = struct{}{}
+		if err := validateRateLimit(tenant.RateLimit, "tenant "+id+" rate_limit"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRateLimit(rate RateLimitConfig, path string) error {
+	if !rate.Enabled && rate.RequestsPerMinute == 0 && rate.Burst == 0 {
+		return nil
+	}
+	if rate.RequestsPerMinute < 0 || rate.Burst < 0 {
+		return fmt.Errorf("config: %s values must not be negative", path)
+	}
+	if rate.Enabled && rate.RequestsPerMinute == 0 {
+		return fmt.Errorf("config: %s.requests_per_minute is required when enabled", path)
+	}
+	if rate.Enabled && rate.Burst == 0 {
+		return fmt.Errorf("config: %s.burst is required when enabled", path)
 	}
 	return nil
 }
@@ -189,55 +149,4 @@ func validateProvider(provider ProviderConfig) error {
 		return fmt.Errorf("config: provider %s base_url must be absolute", provider.Name)
 	}
 	return nil
-}
-
-func applyEnv(cfg *Config) {
-	if listen := os.Getenv("GUARDRAIL_LISTEN_ADDR"); listen != "" {
-		cfg.Server.ListenAddr = listen
-	}
-	if dsn := os.Getenv("GUARDRAIL_AUDIT_SQLITE_DSN"); dsn != "" {
-		cfg.Audit.SQLiteDSN = dsn
-	}
-	appendEnvKeys(&cfg.Auth.ProxyAPIKeys, os.Getenv("GUARDRAIL_PROXY_API_KEY"))
-	appendEnvKeys(&cfg.Auth.ProxyAPIKeys, os.Getenv("GUARDRAIL_PROXY_API_KEYS"))
-	appendEnvKeys(&cfg.Auth.AdminAPIKeys, os.Getenv("GUARDRAIL_ADMIN_API_KEY"))
-	appendEnvKeys(&cfg.Auth.AdminAPIKeys, os.Getenv("GUARDRAIL_ADMIN_API_KEYS"))
-	applyProviderKey(cfg, "openai", os.Getenv("OPENAI_API_KEY"))
-	applyProviderKey(cfg, "anthropic", os.Getenv("ANTHROPIC_API_KEY"))
-	applyProviderKey(cfg, "google", os.Getenv("GEMINI_API_KEY"))
-}
-
-func appendEnvKeys(dst *[]string, raw string) {
-	if raw == "" {
-		return
-	}
-	for _, key := range strings.Split(raw, ",") {
-		key = strings.TrimSpace(key)
-		if key != "" {
-			*dst = append(*dst, key)
-		}
-	}
-}
-
-func nonEmptyStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
-func applyProviderKey(cfg *Config, name string, key string) {
-	if key == "" {
-		return
-	}
-	for i := range cfg.Providers {
-		if cfg.Providers[i].Name == name && len(cfg.Providers[i].APIKeys) == 0 {
-			cfg.Providers[i].APIKeys = []string{key}
-			return
-		}
-	}
 }

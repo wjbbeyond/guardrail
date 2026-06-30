@@ -2,11 +2,11 @@ package cost
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/wjbbeyond/guardrail/internal/authn"
 	"github.com/wjbbeyond/guardrail/internal/config"
 )
 
@@ -27,31 +27,51 @@ type Usage struct {
 }
 
 type Decision struct {
-	Allowed bool    `json:"allowed"`
-	Reason  string  `json:"reason,omitempty"`
-	Spent   float64 `json:"spent_usd"`
-	Limit   float64 `json:"limit_usd"`
+	Allowed  bool    `json:"allowed"`
+	Reason   string  `json:"reason,omitempty"`
+	TenantID string  `json:"tenant_id"`
+	Spent    float64 `json:"spent_usd"`
+	Limit    float64 `json:"limit_usd"`
 }
 
 type Snapshot struct {
+	TenantID         string  `json:"tenant_id"`
 	Day              string  `json:"day"`
 	SpentUSD         float64 `json:"spent_usd"`
 	DailyBudgetUSD   float64 `json:"daily_budget_usd"`
 	RequestBudgetUSD float64 `json:"request_budget_usd"`
 }
 
+type Budget struct {
+	Daily  float64
+	PerReq float64
+}
+
+type Pricer interface {
+	Price(model string, promptTokens int, completionTokens int) float64
+}
+
 type spendLedger interface {
-	AddSpend(ctx context.Context, day string, amount float64) error
-	Spend(ctx context.Context, day string) (float64, error)
+	AddSpend(ctx context.Context, tenantID string, day string, amount float64) error
+	Spend(ctx context.Context, tenantID string, day string) (float64, error)
 }
 
 type Tracker struct {
 	mu         sync.Mutex
 	clock      Clock
-	daily      float64
-	perReq     float64
+	defaults   Budget
+	budgets    map[string]Budget
 	spendByDay map[string]float64
 	ledger     spendLedger
+	pricer     Pricer
+}
+
+type TrackerOptions struct {
+	Cost    config.CostConfig
+	Tenants []config.TenantConfig
+	Clock   Clock
+	Ledger  spendLedger
+	Pricer  Pricer
 }
 
 func NewTracker(cfg config.CostConfig, clock Clock) *Tracker {
@@ -59,71 +79,108 @@ func NewTracker(cfg config.CostConfig, clock Clock) *Tracker {
 }
 
 func NewTrackerWithLedger(cfg config.CostConfig, clock Clock, ledger spendLedger) *Tracker {
+	return NewTrackerWithOptions(TrackerOptions{Cost: cfg, Clock: clock, Ledger: ledger})
+}
+
+func NewTrackerWithOptions(options TrackerOptions) *Tracker {
+	clock := options.Clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	pricer := options.Pricer
+	if pricer == nil {
+		pricer = StaticPricer{}
+	}
 	return &Tracker{
 		clock:      clock,
-		daily:      cfg.DailyBudgetUSD,
-		perReq:     cfg.PerRequestBudgetUSD,
+		defaults:   Budget{Daily: options.Cost.DailyBudgetUSD, PerReq: options.Cost.PerRequestBudgetUSD},
+		budgets:    tenantBudgets(options.Cost, options.Tenants),
 		spendByDay: make(map[string]float64),
-		ledger:     ledger,
+		ledger:     options.Ledger,
+		pricer:     pricer,
 	}
 }
 
 func (t *Tracker) Allow(ctx context.Context, model string, promptTokens int, maxCompletionTokens int) (Decision, error) {
-	estimated := Price(model, promptTokens, maxCompletionTokens)
+	return t.AllowTenant(ctx, authn.DefaultTenantID, model, promptTokens, maxCompletionTokens)
+}
+
+func (t *Tracker) AllowTenant(ctx context.Context, tenantID string, model string, promptTokens int, maxCompletionTokens int) (Decision, error) {
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
+	}
+	estimated := t.pricer.Price(model, promptTokens, maxCompletionTokens)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	budget := t.budgetForTenant(tenantID)
 	day := t.day()
-	spent, err := t.spentForDay(ctx, day)
+	spent, err := t.spentForDay(ctx, tenantID, day)
 	if err != nil {
 		return Decision{}, err
 	}
-	if t.perReq > 0 && estimated > t.perReq {
-		return Decision{Allowed: false, Reason: "per_request_budget_exceeded", Spent: estimated, Limit: t.perReq}, nil
+	if budget.PerReq > 0 && estimated > budget.PerReq {
+		return Decision{Allowed: false, Reason: "per_request_budget_exceeded", TenantID: tenantID, Spent: estimated, Limit: budget.PerReq}, nil
 	}
-	if t.daily > 0 && spent+estimated > t.daily {
-		return Decision{Allowed: false, Reason: "daily_budget_exceeded", Spent: spent, Limit: t.daily}, nil
+	if budget.Daily > 0 && spent+estimated > budget.Daily {
+		return Decision{Allowed: false, Reason: "daily_budget_exceeded", TenantID: tenantID, Spent: spent, Limit: budget.Daily}, nil
 	}
-	return Decision{Allowed: true, Spent: spent, Limit: t.daily}, nil
+	return Decision{Allowed: true, TenantID: tenantID, Spent: spent, Limit: budget.Daily}, nil
 }
 
 func (t *Tracker) Record(ctx context.Context, model string, promptTokens int, completionTokens int) (Usage, error) {
+	return t.RecordTenant(ctx, authn.DefaultTenantID, model, promptTokens, completionTokens)
+}
+
+func (t *Tracker) RecordTenant(ctx context.Context, tenantID string, model string, promptTokens int, completionTokens int) (Usage, error) {
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
+	}
 	usage := Usage{
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
-		CostUSD:          Price(model, promptTokens, completionTokens),
+		CostUSD:          t.pricer.Price(model, promptTokens, completionTokens),
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	day := t.day()
 	if t.ledger != nil {
-		if err := t.ledger.AddSpend(ctx, day, usage.CostUSD); err != nil {
+		if err := t.ledger.AddSpend(ctx, tenantID, day, usage.CostUSD); err != nil {
 			return Usage{}, fmt.Errorf("record spend: %w", err)
 		}
-		spent, err := t.ledger.Spend(ctx, day)
+		spent, err := t.ledger.Spend(ctx, tenantID, day)
 		if err != nil {
 			return Usage{}, fmt.Errorf("read recorded spend: %w", err)
 		}
-		t.spendByDay[day] = spent
+		t.spendByDay[spendKey(tenantID, day)] = spent
 		return usage, nil
 	}
-	t.spendByDay[day] += usage.CostUSD
+	t.spendByDay[spendKey(tenantID, day)] += usage.CostUSD
 	return usage, nil
 }
 
 func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
+	return t.SnapshotTenant(ctx, authn.DefaultTenantID)
+}
+
+func (t *Tracker) SnapshotTenant(ctx context.Context, tenantID string) (Snapshot, error) {
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	day := t.day()
-	spent, err := t.spentForDay(ctx, day)
+	spent, err := t.spentForDay(ctx, tenantID, day)
 	if err != nil {
 		return Snapshot{}, err
 	}
+	budget := t.budgetForTenant(tenantID)
 	return Snapshot{
+		TenantID:         tenantID,
 		Day:              day,
 		SpentUSD:         spent,
-		DailyBudgetUSD:   t.daily,
-		RequestBudgetUSD: t.perReq,
+		DailyBudgetUSD:   budget.Daily,
+		RequestBudgetUSD: budget.PerReq,
 	}, nil
 }
 
@@ -131,67 +188,48 @@ func (t *Tracker) day() string {
 	return t.clock.Now().Format("2006-01-02")
 }
 
-func (t *Tracker) spentForDay(ctx context.Context, day string) (float64, error) {
+func (t *Tracker) spentForDay(ctx context.Context, tenantID string, day string) (float64, error) {
+	key := spendKey(tenantID, day)
 	if t.ledger == nil {
-		return t.spendByDay[day], nil
+		return t.spendByDay[key], nil
 	}
-	spent, err := t.ledger.Spend(ctx, day)
+	spent, err := t.ledger.Spend(ctx, tenantID, day)
 	if err != nil {
 		return 0, fmt.Errorf("read spend: %w", err)
 	}
-	t.spendByDay[day] = spent
+	t.spendByDay[key] = spent
 	return spent, nil
 }
 
-func EstimateTokens(text string) int {
-	runes := len([]rune(text))
-	if runes == 0 {
-		return 0
+func (t *Tracker) budgetForTenant(tenantID string) Budget {
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
 	}
-	return (runes + 3) / 4
+	if budget, ok := t.budgets[tenantID]; ok {
+		return budget
+	}
+	return t.defaults
 }
 
-func CompletionTokensFromOpenAI(body []byte) int {
-	var payload struct {
-		Usage struct {
-			CompletionTokens int `json:"completion_tokens"`
-		} `json:"usage"`
+func tenantBudgets(cfg config.CostConfig, tenants []config.TenantConfig) map[string]Budget {
+	budgets := make(map[string]Budget, len(tenants))
+	defaults := Budget{Daily: cfg.DailyBudgetUSD, PerReq: cfg.PerRequestBudgetUSD}
+	for _, tenant := range tenants {
+		budget := defaults
+		if tenant.DailyBudgetUSD > 0 {
+			budget.Daily = tenant.DailyBudgetUSD
+		}
+		if tenant.PerRequestBudgetUSD > 0 {
+			budget.PerReq = tenant.PerRequestBudgetUSD
+		}
+		budgets[tenant.ID] = budget
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return EstimateTokens(string(body))
-	}
-	if payload.Usage.CompletionTokens > 0 {
-		return payload.Usage.CompletionTokens
-	}
-	return EstimateTokens(string(body))
+	return budgets
 }
 
-func Price(model string, promptTokens int, completionTokens int) float64 {
-	price := priceForModel(model)
-	return (float64(promptTokens)*price.inputPerMTok + float64(completionTokens)*price.outputPerMTok) / 1_000_000
-}
-
-type modelPrice struct {
-	inputPerMTok  float64
-	outputPerMTok float64
-}
-
-func priceForModel(model string) modelPrice {
-	prices := map[string]modelPrice{
-		"gpt-4o":                {inputPerMTok: 2.50, outputPerMTok: 10.00},
-		"gpt-4o-mini":           {inputPerMTok: 0.15, outputPerMTok: 0.60},
-		"gpt-4.1":               {inputPerMTok: 2.00, outputPerMTok: 8.00},
-		"gpt-4.1-mini":          {inputPerMTok: 0.40, outputPerMTok: 1.60},
-		"claude-3-5-sonnet":     {inputPerMTok: 3.00, outputPerMTok: 15.00},
-		"claude-3-5-haiku":      {inputPerMTok: 0.80, outputPerMTok: 4.00},
-		"gemini-1.5-pro":        {inputPerMTok: 1.25, outputPerMTok: 5.00},
-		"gemini-1.5-flash":      {inputPerMTok: 0.075, outputPerMTok: 0.30},
-		"gemini-2.0-flash":      {inputPerMTok: 0.10, outputPerMTok: 0.40},
-		"gemini-2.5-flash-lite": {inputPerMTok: 0.10, outputPerMTok: 0.40},
-		"gemini-2.5-pro":        {inputPerMTok: 1.25, outputPerMTok: 10.00},
+func spendKey(tenantID string, day string) string {
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
 	}
-	if price, ok := prices[model]; ok {
-		return price
-	}
-	return modelPrice{inputPerMTok: 1.00, outputPerMTok: 3.00}
+	return tenantID + "\x00" + day
 }

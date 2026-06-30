@@ -3,10 +3,16 @@ package gateway
 import (
 	"net/http"
 	"strconv"
+
+	"github.com/wjbbeyond/guardrail/internal/authn"
 )
 
 func (s *Server) costsHandler(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := s.costs.Snapshot(r.Context())
+	tenantID := r.URL.Query().Get("tenant_id")
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
+	}
+	snapshot, err := s.costs.SnapshotTenant(r.Context(), tenantID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "read cost snapshot")
 		return

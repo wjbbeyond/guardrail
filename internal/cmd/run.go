@@ -8,11 +8,13 @@ import (
 	"os"
 
 	"github.com/wjbbeyond/guardrail/internal/audit"
+	"github.com/wjbbeyond/guardrail/internal/authn"
 	"github.com/wjbbeyond/guardrail/internal/config"
 	"github.com/wjbbeyond/guardrail/internal/cost"
 	"github.com/wjbbeyond/guardrail/internal/gateway"
 	"github.com/wjbbeyond/guardrail/internal/metrics"
 	"github.com/wjbbeyond/guardrail/internal/provider"
+	"github.com/wjbbeyond/guardrail/internal/ratelimit"
 	"github.com/wjbbeyond/guardrail/internal/security"
 )
 
@@ -42,6 +44,17 @@ func Execute(ctx context.Context, args []string) error {
 		return fmt.Errorf("open cost ledger: %w", err)
 	}
 	defer costLedger.Close()
+	authManager, err := authn.NewManager(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("build auth manager: %w", err)
+	}
+	priceTable := cost.NewPriceTable(cfg.Pricing)
+	if err := priceTable.Refresh(ctx); err != nil {
+		logger.WarnContext(ctx, "refresh pricing table", slog.Any("err", err))
+	}
+	go priceTable.RunAutoRefresh(ctx, cfg.Pricing.RefreshInterval, func(err error) {
+		logger.WarnContext(ctx, "refresh pricing table", slog.Any("err", err))
+	})
 
 	router, err := provider.NewRouter(cfg.Providers, cfg.Reliability.ProviderTimeout)
 	if err != nil {
@@ -49,10 +62,18 @@ func Execute(ctx context.Context, args []string) error {
 	}
 
 	server := gateway.New(gateway.Dependencies{
-		Config:  cfg,
-		Router:  router,
-		Guard:   security.NewGuard(cfg.Security),
-		Costs:   cost.NewTrackerWithLedger(cfg.Cost, cost.RealClock{}, costLedger),
+		Config: cfg,
+		Auth:   authManager,
+		Router: router,
+		Guard:  security.NewGuard(cfg.Security),
+		Costs: cost.NewTrackerWithOptions(cost.TrackerOptions{
+			Cost:    cfg.Cost,
+			Tenants: cfg.Tenants,
+			Clock:   cost.RealClock{},
+			Ledger:  costLedger,
+			Pricer:  priceTable,
+		}),
+		Limits:  ratelimit.New(cfg.RateLimit, cfg.Tenants, ratelimit.RealClock{}),
 		Audit:   auditor,
 		Metrics: metrics.NewRegistry(),
 		Logger:  logger,

@@ -29,12 +29,12 @@ Requires a proxy API key when auth is enabled.
 
 ## `GET /v1/admin/costs`
 
-Returns current daily spend and configured budgets.
+Returns current daily spend and configured budgets for a tenant. Use `?tenant_id=acme`; omitted `tenant_id` means `default`.
 
 Requires an admin API key when auth is enabled.
 
 ## `GET /v1/admin/audit?limit=100`
 
-Returns recent audit events from SQLite.
+Returns recent audit events from SQLite. Events include `tenant_id`.
 
 Requires an admin API key when auth is enabled.

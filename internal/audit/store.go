@@ -4,7 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/wjbbeyond/guardrail/internal/authn"
+	"github.com/wjbbeyond/guardrail/internal/store"
 
 	_ "modernc.org/sqlite"
 )
@@ -17,6 +21,7 @@ type Event struct {
 	ID               int64     `json:"id"`
 	Timestamp        time.Time `json:"timestamp"`
 	RequestID        string    `json:"request_id"`
+	TenantID         string    `json:"tenant_id"`
 	Route            string    `json:"route"`
 	Provider         string    `json:"provider"`
 	Model            string    `json:"model"`
@@ -44,12 +49,17 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 func (s *Store) Record(ctx context.Context, event Event) error {
 	query := `
 INSERT INTO audit_events (
-  timestamp, request_id, route, provider, model, status,
+  timestamp, request_id, tenant_id, route, provider, model, status,
   prompt_tokens, completion_tokens, cost_usd, security_action, latency_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	tenantID := event.TenantID
+	if tenantID == "" {
+		tenantID = authn.DefaultTenantID
+	}
 	if _, err := s.db.ExecContext(ctx, query,
 		event.Timestamp.UTC().Format(time.RFC3339Nano),
 		event.RequestID,
+		tenantID,
 		event.Route,
 		event.Provider,
 		event.Model,
@@ -70,7 +80,7 @@ func (s *Store) Recent(ctx context.Context, limit int) ([]Event, error) {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, timestamp, request_id, route, provider, model, status,
+SELECT id, timestamp, request_id, tenant_id, route, provider, model, status,
   prompt_tokens, completion_tokens, cost_usd, security_action, latency_ms
 FROM audit_events
 ORDER BY id DESC
@@ -88,6 +98,7 @@ LIMIT ?`, limit)
 			&event.ID,
 			&timestamp,
 			&event.RequestID,
+			&event.TenantID,
 			&event.Route,
 			&event.Provider,
 			&event.Model,
@@ -118,11 +129,18 @@ func (s *Store) Close() {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	query := `
+	migrator := store.Migrator{
+		Namespace: "audit",
+		Migrations: []store.Migration{
+			{
+				Version: 1,
+				Name:    "create audit events",
+				SQL: `
 CREATE TABLE IF NOT EXISTS audit_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp TEXT NOT NULL,
   request_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'default',
   route TEXT NOT NULL,
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
@@ -134,9 +152,56 @@ CREATE TABLE IF NOT EXISTS audit_events (
   latency_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_timestamp ON audit_events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_audit_events_request_id ON audit_events(request_id);`
-	if _, err := s.db.ExecContext(ctx, query); err != nil {
-		return fmt.Errorf("migrate audit store: %w", err)
+CREATE INDEX IF NOT EXISTS idx_audit_events_request_id ON audit_events(request_id);`,
+			},
+			{
+				Version: 2,
+				Name:    "audit tenant id",
+				Apply:   ensureAuditTenantID,
+			},
+		},
+	}
+	return migrator.Run(ctx, s.db)
+}
+
+func ensureAuditTenantID(ctx context.Context, db store.SQLRunner) error {
+	hasTenantID, err := auditEventsHasTenantID(ctx, db)
+	if err != nil {
+		return err
+	}
+	if !hasTenantID {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE audit_events ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'`); err != nil {
+			return fmt.Errorf("add audit tenant column: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_id ON audit_events(tenant_id)`); err != nil {
+		return fmt.Errorf("create audit tenant index: %w", err)
 	}
 	return nil
+}
+
+func auditEventsHasTenantID(ctx context.Context, db store.SQLRunner) (bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(audit_events)`)
+	if err != nil {
+		return false, fmt.Errorf("inspect audit events table: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, fmt.Errorf("scan audit column: %w", err)
+		}
+		if strings.EqualFold(name, "tenant_id") {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate audit columns: %w", err)
+	}
+	return false, nil
 }

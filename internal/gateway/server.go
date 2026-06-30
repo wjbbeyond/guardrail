@@ -8,18 +8,22 @@ import (
 	"net/http"
 
 	"github.com/wjbbeyond/guardrail/internal/audit"
+	"github.com/wjbbeyond/guardrail/internal/authn"
 	"github.com/wjbbeyond/guardrail/internal/config"
 	"github.com/wjbbeyond/guardrail/internal/cost"
 	"github.com/wjbbeyond/guardrail/internal/metrics"
 	"github.com/wjbbeyond/guardrail/internal/provider"
+	"github.com/wjbbeyond/guardrail/internal/ratelimit"
 	"github.com/wjbbeyond/guardrail/internal/security"
 )
 
 type Dependencies struct {
 	Config  config.Config
+	Auth    *authn.Manager
 	Router  *provider.Router
 	Guard   *security.Guard
 	Costs   *cost.Tracker
+	Limits  *ratelimit.Limiter
 	Audit   *audit.Store
 	Metrics *metrics.Registry
 	Logger  *slog.Logger
@@ -27,9 +31,11 @@ type Dependencies struct {
 
 type Server struct {
 	cfg     config.Config
+	auth    *authn.Manager
 	router  *provider.Router
 	guard   *security.Guard
 	costs   *cost.Tracker
+	limits  *ratelimit.Limiter
 	audit   *audit.Store
 	metrics *metrics.Registry
 	logger  *slog.Logger
@@ -39,12 +45,17 @@ type Server struct {
 func New(deps Dependencies) *Server {
 	server := &Server{
 		cfg:     deps.Config,
+		auth:    deps.Auth,
 		router:  deps.Router,
 		guard:   deps.Guard,
 		costs:   deps.Costs,
+		limits:  deps.Limits,
 		audit:   deps.Audit,
 		metrics: deps.Metrics,
 		logger:  deps.Logger,
+	}
+	if server.auth == nil {
+		server.auth = authn.NewManagerWithVerifier(deps.Config, nil)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.healthz)
