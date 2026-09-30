@@ -78,8 +78,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.logger.ErrorContext(r.Context(), "all providers failed", "request_id", requestID(r.Context()))
 		writeError(w, http.StatusBadGateway, "upstream request failed")
 		// An ambiguous transport failure may already have incurred cost.
-		_, _ = s.settleUsage(r.Context(), reservation, chat.Model, promptTokens, maxTokens)
-		s.recordAudit(r.Context(), auditInput{start: start, tenantID: identity.TenantID, route: r.URL.Path, model: chat.Model, status: http.StatusBadGateway, action: decision.Action, promptTokens: promptTokens})
+		usage, _ := s.settleUsage(r.Context(), reservation, chat.Model, promptTokens, maxTokens)
+		s.metrics.RecordCost(usage.CostUSD)
+		s.recordAudit(r.Context(), auditInput{start: start, tenantID: identity.TenantID, route: r.URL.Path, model: chat.Model, status: http.StatusBadGateway, action: decision.Action, usage: usage})
 		return
 	}
 

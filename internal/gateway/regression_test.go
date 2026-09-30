@@ -2,9 +2,12 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"fmt"
 	"github.com/wjbbeyond/guardrail/internal/cost"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -99,5 +102,28 @@ func TestStreamFlushesBeforeUpstreamCompletes(t *testing.T) {
 	line, err := bufio.NewReader(resp.Body).ReadString('\n')
 	if err != nil || !strings.HasPrefix(line, "data:") {
 		t.Fatalf("first frame: %q %v", line, err)
+	}
+}
+
+type errorTransport struct{}
+
+func (errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("fake-provider-secret")
+}
+
+func TestTransportErrorsHideSecretsAndAuditReservedCost(t *testing.T) {
+	server, audit := newTestServer(t, context.Background(), "http://example.invalid", 10)
+	server.router.Candidates("gpt-4o")[0].Client().Transport = errorTransport{}
+	var logs bytes.Buffer
+	server.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	request := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"content":"test"}]}`))
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != 502 || strings.Contains(response.Body.String()+logs.String(), "fake-provider-secret") {
+		t.Fatalf("unsafe error response/log: %s %s", response.Body.String(), logs.String())
+	}
+	events, err := audit.Recent(context.Background(), 1)
+	if err != nil || len(events) != 1 || events[0].CostUSD <= 0 {
+		t.Fatalf("reserved charge missing from audit: %+v %v", events, err)
 	}
 }
