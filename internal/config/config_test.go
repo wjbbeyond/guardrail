@@ -119,7 +119,7 @@ func TestRejectsUnsafeConfiguration(t *testing.T) {
 		func(c *Config) { c.Security.ExtraPIIPatterns = []string{"["} },
 		func(c *Config) { c.Cost.DailyBudgetUSD = -1 },
 		func(c *Config) { c.Tenants = []TenantConfig{{ID: " acme "}} },
-		func(c *Config) { c.Auth.AdminAPIKeys = []string{"shared"}; c.Auth.ProxyAPIKeys = []string{"shared"} },
+		func(c *Config) { c.Auth.AdminAPIKeys = []string{" shared "}; c.Auth.ProxyAPIKeys = []string{"shared"} },
 	} {
 		c := Default()
 		c.Auth.Enabled = false

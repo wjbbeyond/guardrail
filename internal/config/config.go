@@ -57,7 +57,8 @@ func (c Config) Validate() error {
 	budgets := []float64{c.Cost.DailyBudgetUSD, c.Cost.PerRequestBudgetUSD}
 	keys := map[string]bool{}
 	for _, key := range append(append([]string{}, c.Auth.AdminAPIKeys...), c.Auth.ProxyAPIKeys...) {
-		if strings.TrimSpace(key) != "" {
+		key = strings.TrimSpace(key)
+		if key != "" {
 			if keys[key] {
 				return errors.New("config: duplicate authentication key")
 			}
@@ -70,7 +71,8 @@ func (c Config) Validate() error {
 			return errors.New("config: tenant id must not have surrounding whitespace")
 		}
 		for _, key := range tenant.ProxyAPIKeys {
-			if strings.TrimSpace(key) != "" {
+			key = strings.TrimSpace(key)
+			if key != "" {
 				if keys[key] {
 					return errors.New("config: duplicate authentication key")
 				}
