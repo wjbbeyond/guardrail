@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -70,6 +71,9 @@ func (p *PriceTable) Refresh(ctx context.Context) error {
 	}
 	next := defaultPrices()
 	for model, price := range feed.Models {
+		if price.InputPerMTok < 0 || price.OutputPerMTok < 0 || math.IsNaN(price.InputPerMTok) || math.IsNaN(price.OutputPerMTok) || math.IsInf(price.InputPerMTok, 0) || math.IsInf(price.OutputPerMTok, 0) {
+			return fmt.Errorf("invalid model price")
+		}
 		next[model] = modelPrice{inputPerMTok: price.InputPerMTok, outputPerMTok: price.OutputPerMTok}
 	}
 	p.mu.Lock()
@@ -110,4 +114,11 @@ func defaultPrices() map[string]modelPrice {
 		"gemini-2.5-flash-lite": {inputPerMTok: 0.10, outputPerMTok: 0.40},
 		"gemini-2.5-pro":        {inputPerMTok: 1.25, outputPerMTok: 10.00},
 	}
+}
+
+func (p *PriceTable) HasPrice(model string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.prices[model]
+	return ok
 }

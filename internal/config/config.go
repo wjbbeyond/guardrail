@@ -1,10 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -12,6 +15,7 @@ import (
 
 func Load(path string) (Config, error) {
 	cfg := Default()
+	explicit := path != "" || os.Getenv("GUARDRAIL_CONFIG") != ""
 	configPath := path
 	if configPath == "" {
 		configPath = os.Getenv("GUARDRAIL_CONFIG")
@@ -21,10 +25,12 @@ func Load(path string) (Config, error) {
 	}
 
 	if raw, err := os.ReadFile(configPath); err == nil {
-		if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		decoder := yaml.NewDecoder(bytes.NewReader(raw))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&cfg); err != nil {
 			return Config{}, fmt.Errorf("decode %s: %w", configPath, err)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if explicit || !errors.Is(err, os.ErrNotExist) {
 		return Config{}, fmt.Errorf("read %s: %w", configPath, err)
 	}
 
@@ -36,6 +42,50 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	for _, mode := range []string{c.Security.PIIMode, c.Security.PromptInjectionMode} {
+		switch strings.ToLower(strings.TrimSpace(mode)) {
+		case "off", "warn", "redact", "block":
+		default:
+			return errors.New("config: invalid security mode")
+		}
+	}
+	for _, pattern := range c.Security.ExtraPIIPatterns {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("config: invalid PII pattern: %w", err)
+		}
+	}
+	budgets := []float64{c.Cost.DailyBudgetUSD, c.Cost.PerRequestBudgetUSD}
+	keys := map[string]bool{}
+	for _, key := range append(append([]string{}, c.Auth.AdminAPIKeys...), c.Auth.ProxyAPIKeys...) {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			if keys[key] {
+				return errors.New("config: duplicate authentication key")
+			}
+			keys[key] = true
+		}
+	}
+	for _, tenant := range c.Tenants {
+		budgets = append(budgets, tenant.DailyBudgetUSD, tenant.PerRequestBudgetUSD)
+		if tenant.ID != strings.TrimSpace(tenant.ID) {
+			return errors.New("config: tenant id must not have surrounding whitespace")
+		}
+		for _, key := range tenant.ProxyAPIKeys {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				if keys[key] {
+					return errors.New("config: duplicate authentication key")
+				}
+				keys[key] = true
+			}
+		}
+	}
+	for _, value := range budgets {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return errors.New("config: budgets must be finite and nonnegative")
+		}
+	}
+
 	if strings.TrimSpace(c.Server.ListenAddr) == "" {
 		return errors.New("config: server.listen_addr is required")
 	}

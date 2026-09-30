@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/wjbbeyond/guardrail/internal/llm"
 )
@@ -22,7 +23,7 @@ func (p *Provider) openAI(ctx context.Context, chat llm.ChatCompletionRequest, r
 	if err != nil {
 		return nil, fmt.Errorf("call provider %s: %w", p.Name, err)
 	}
-	if chat.Stream && resp.StatusCode < http.StatusInternalServerError && resp.StatusCode != http.StatusTooManyRequests {
+	if chat.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		return &UpstreamResponse{
 			Header:    resp.Header.Clone(),
 			Stream:    resp.Body,

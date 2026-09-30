@@ -22,3 +22,5 @@ func priceForModel(model string) modelPrice {
 	}
 	return modelPrice{inputPerMTok: 1.00, outputPerMTok: 3.00}
 }
+
+func (StaticPricer) HasPrice(model string) bool { _, ok := defaultPrices()[model]; return ok }
