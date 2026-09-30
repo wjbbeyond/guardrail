@@ -30,7 +30,7 @@ func TestEscapedPIIAndOutputLimit(t *testing.T) {
 	if err != nil || strings.Contains(string(nested), "example.com") {
 		t.Fatalf("nested tool PII: %s %v", nested, err)
 	}
-	for _, extra := range []string{`"n":2`, `"max_tokens":-1`, `"max_tokens":1,"max_completion_tokens":2`} {
+	for _, extra := range []string{`"modalities":["audio"]`, `"audio":{"format":"wav"}`, `"n":2`, `"max_tokens":-1`, `"max_tokens":1,"max_completion_tokens":2`} {
 		_, _, _, err = server.normalize([]byte(`{"model":"gpt-4o","messages":[{"content":"hello"}],` + extra + `}`))
 		if err == nil {
 			t.Fatal("accepted", extra)

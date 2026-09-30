@@ -20,6 +20,15 @@ func (s *Server) normalize(body []byte) (llm.ChatCompletionRequest, []byte, secu
 	if err := decoder.Decode(&fields); err != nil {
 		return llm.ChatCompletionRequest{}, nil, security.Decision{}, err
 	}
+	if _, ok := fields["audio"]; ok {
+		return llm.ChatCompletionRequest{}, nil, security.Decision{}, fmt.Errorf("audio output is not supported")
+	}
+	if modalities, ok := fields["modalities"]; ok {
+		values, valid := modalities.([]any)
+		if !valid || len(values) != 1 || values[0] != "text" {
+			return llm.ChatCompletionRequest{}, nil, security.Decision{}, fmt.Errorf("only text output is supported")
+		}
+	}
 	limit := 1024
 	field := "max_tokens"
 	if _, ok := fields["max_completion_tokens"]; ok {
