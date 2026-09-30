@@ -56,3 +56,26 @@ Audit data is stored in SQLite by default.
 ## Cost State
 
 Daily spend is also persisted per tenant in SQLite. This prevents a process restart from resetting active daily budget enforcement.
+
+## Budget and text inspection boundaries
+
+Requests reserve their estimated full output cost atomically before dispatch.
+SQLite persists the reservation with the daily spend; concurrent gateways sharing
+that database see the same reservation. Successful usage settles once against the
+original UTC day. Missing usage, interrupted streams, and ambiguous provider errors
+are charged conservatively at the reserved estimate. A crash leaves that charge in
+place; operators must reconcile abandoned reservations against provider billing
+before manually adjusting the ledger. This favors limiting spend over automatic
+refunds. Input token counts remain estimates until provider usage arrives; unknown
+models require a pricing-feed entry. Estimates and provider failover are not hard billing guarantees.
+
+String values are inspected and redacted after JSON decoding, including tool
+metadata, then re-encoded. Binary/multimodal input is rejected until it has an
+explicit inspection/pricing policy. Encoded content inside strings and semantic
+PII remain limitations of regex inspection. Output defaults to 1024 tokens and the
+same limit is sent upstream; only one candidate is supported. Stream usage is
+requested and parsed from SSE, with conservative fallback when absent. Accounting
+and audit writes use a separate five-second timeout after client cancellation.
+
+Container data belongs to UID/GID 10001 at `/data`. Back up existing volumes and
+adjust their ownership to 10001:10001 before upgrading; do not grant world-write.

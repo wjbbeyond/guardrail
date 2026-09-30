@@ -70,11 +70,16 @@ func (l *SQLiteLedger) migrate(ctx context.Context) error {
 	migrator := store.Migrator{
 		Namespace: "cost",
 		Migrations: []store.Migration{
+
 			{
 				Version: 1,
 				Name:    "tenant cost spend",
 				Apply:   migrateTenantCostSpend,
 			},
+			{Version: 2, Name: "durable budget reservations", Apply: func(ctx context.Context, db store.SQLRunner) error {
+				_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS cost_reservations (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, day TEXT NOT NULL, amount REAL NOT NULL)`)
+				return err
+			}},
 		},
 	}
 	return migrator.Run(ctx, l.db)

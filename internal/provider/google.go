@@ -51,6 +51,7 @@ func (p *Provider) google(ctx context.Context, chat llm.ChatCompletionRequest) (
 		return nil, fmt.Errorf("build google request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", p.NextKey())
 	resp, err := p.Client().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("call provider %s: %w", p.Name, err)
@@ -73,11 +74,6 @@ func (p *Provider) googleEndpoint(model string) (string, error) {
 	parsed, err := url.Parse(p.Endpoint("/models/" + url.PathEscape(model) + ":generateContent"))
 	if err != nil {
 		return "", fmt.Errorf("build google endpoint: %w", err)
-	}
-	if key := p.NextKey(); key != "" {
-		query := parsed.Query()
-		query.Set("key", key)
-		parsed.RawQuery = query.Encode()
 	}
 	return parsed.String(), nil
 }

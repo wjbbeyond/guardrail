@@ -24,6 +24,8 @@ type auditInput struct {
 }
 
 func (s *Server) recordAudit(ctx context.Context, input auditInput) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	status := input.status
 	if status == 0 {
 		status = http.StatusOK

@@ -1,7 +1,10 @@
 package gateway
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -38,15 +41,14 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	chat, err := llm.DecodeChatCompletion(body)
+	chat, forwardBody, decision, err := s.normalize(body)
 	if err != nil {
 		s.metrics.RecordBlocked()
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	promptTokens := cost.EstimateTokens(chat.PromptText())
-	decision := s.guard.Inspect(chat.PromptText())
+	promptTokens := cost.EstimateTokens(string(forwardBody))
 	if decision.Action == security.ActionBlock {
 		s.metrics.RecordBlocked()
 		w.Header().Set("X-GuardRail-Security", securityHeader(decision))
@@ -55,24 +57,8 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	forwardBody := body
-	if decision.Action == security.ActionRedact {
-		redacted, _ := s.guard.Redact(string(body))
-		forwardBody = []byte(redacted)
-		chat, err = llm.DecodeChatCompletion(forwardBody)
-		if err != nil {
-			s.metrics.RecordBlocked()
-			writeError(w, http.StatusBadRequest, "redacted request is not valid JSON")
-			return
-		}
-		promptTokens = cost.EstimateTokens(chat.PromptText())
-	}
-
 	maxTokens := chat.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = 1024
-	}
-	budget, err := s.costs.AllowTenant(r.Context(), identity.TenantID, chat.Model, promptTokens, maxTokens)
+	reservation, budget, err := s.costs.ReserveTenant(r.Context(), identity.TenantID, chat.Model, promptTokens, maxTokens)
 	if err != nil {
 		s.metrics.RecordBlocked()
 		s.logger.ErrorContext(r.Context(), "evaluate budget", slog.Any("err", err))
@@ -89,16 +75,18 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	upstream, err := s.callProviders(r.Context(), chat, forwardBody)
 	if err != nil {
-		s.logger.ErrorContext(r.Context(), "all providers failed", slog.Any("err", err))
-		writeError(w, http.StatusBadGateway, err.Error())
+		s.logger.ErrorContext(r.Context(), "all providers failed", "request_id", requestID(r.Context()))
+		writeError(w, http.StatusBadGateway, "upstream request failed")
+		// An ambiguous transport failure may already have incurred cost.
+		_, _ = s.settleUsage(r.Context(), reservation, chat.Model, promptTokens, maxTokens)
 		s.recordAudit(r.Context(), auditInput{start: start, tenantID: identity.TenantID, route: r.URL.Path, model: chat.Model, status: http.StatusBadGateway, action: decision.Action, promptTokens: promptTokens})
 		return
 	}
 
 	w.Header().Set("X-GuardRail-Security", securityHeader(decision))
 	if upstream.Streaming {
-		s.writeStream(w, r, upstream)
-		usage := s.recordUsage(r.Context(), identity.TenantID, chat.Model, promptTokens, 0)
+		actualPrompt, actualCompletion := s.writeStream(w, r, upstream, promptTokens, maxTokens)
+		usage, _ := s.settleUsage(r.Context(), reservation, chat.Model, actualPrompt, actualCompletion)
 		s.metrics.RecordCost(usage.CostUSD)
 		s.recordAudit(r.Context(), auditInput{start: start, tenantID: identity.TenantID, route: r.URL.Path, provider: upstream.Provider, model: chat.Model, status: upstream.Status, action: decision.Action, usage: usage})
 		return
@@ -109,8 +97,14 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(upstream.Body); err != nil {
 		s.logger.ErrorContext(r.Context(), "write provider response", slog.Any("err", err))
 	}
-	completionTokens := cost.CompletionTokensFromOpenAI(upstream.Body)
-	usage := s.recordUsage(r.Context(), identity.TenantID, chat.Model, promptTokens, completionTokens)
+	actualPrompt, completionTokens, ok := usageFromJSON(upstream.Body)
+	if !ok {
+		actualPrompt, completionTokens = promptTokens, maxTokens
+	}
+	if upstream.Status >= 400 {
+		actualPrompt, completionTokens = 0, 0
+	}
+	usage, _ := s.settleUsage(r.Context(), reservation, chat.Model, actualPrompt, completionTokens)
 	s.metrics.RecordCost(usage.CostUSD)
 	s.recordAudit(r.Context(), auditInput{start: start, tenantID: identity.TenantID, route: r.URL.Path, provider: upstream.Provider, model: chat.Model, status: upstream.Status, action: decision.Action, usage: usage})
 }
@@ -150,35 +144,58 @@ func (s *Server) callProviders(ctx context.Context, chat llm.ChatCompletionReque
 	return nil, lastErr
 }
 
-func (s *Server) writeStream(w http.ResponseWriter, r *http.Request, upstream *provider.UpstreamResponse) {
+func usageFromJSON(body []byte) (int, int, bool) {
+	var payload struct {
+		Usage *struct {
+			Prompt     *int `json:"prompt_tokens"`
+			Completion *int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Usage == nil || payload.Usage.Prompt == nil || payload.Usage.Completion == nil {
+		return 0, 0, false
+	}
+	p, c := *payload.Usage.Prompt, *payload.Usage.Completion
+	return p, c, p >= 0 && c >= 0
+}
+
+func (s *Server) writeStream(w http.ResponseWriter, r *http.Request, upstream *provider.UpstreamResponse, prompt, completion int) (int, int) {
 	defer upstream.Stream.Close()
 	copyHeaders(w.Header(), upstream.Header)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(upstream.Status)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.logger.ErrorContext(r.Context(), "response writer does not support streaming")
-		return
-	}
-	if _, err := io.Copy(w, upstream.Stream); err != nil {
-		s.logger.ErrorContext(r.Context(), "copy stream", slog.Any("err", err))
-		return
-	}
-	flusher.Flush()
-}
-
-func (s *Server) recordUsage(ctx context.Context, tenantID string, model string, promptTokens int, completionTokens int) cost.Usage {
-	usage, err := s.costs.RecordTenant(ctx, tenantID, model, promptTokens, completionTokens)
-	if err != nil {
-		s.logger.ErrorContext(ctx, "record cost usage", slog.Any("err", err))
-		return cost.Usage{
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			CostUSD:          cost.Price(model, promptTokens, completionTokens),
+	controller := http.NewResponseController(w)
+	scanner := bufio.NewScanner(upstream.Stream)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	var data []byte
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			if p, c, ok := usageFromJSON(bytes.TrimSpace(data)); ok {
+				prompt, completion = p, c
+			}
+			data = nil
+		} else if bytes.HasPrefix(line, []byte("data:")) {
+			data = append(data, bytes.TrimSpace(line[5:])...)
+			data = append(data, '\n')
+		}
+		if _, err := w.Write(append(append([]byte(nil), line...), '\n')); err != nil {
+			return prompt, completion
+		}
+		if err := controller.Flush(); err != nil {
+			return prompt, completion
 		}
 	}
-	return usage
+	return prompt, completion
+}
+
+func (s *Server) settleUsage(ctx context.Context, reservation cost.Reservation, model string, prompt, completion int) (cost.Usage, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	usage, err := s.costs.Settle(ctx, reservation, model, prompt, completion)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "settle cost usage; reservation retained", slog.Any("err", err))
+	}
+	return usage, err
 }

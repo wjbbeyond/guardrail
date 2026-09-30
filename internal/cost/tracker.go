@@ -48,6 +48,7 @@ type Budget struct {
 }
 
 type Pricer interface {
+	HasPrice(model string) bool
 	Price(model string, promptTokens int, completionTokens int) float64
 }
 
@@ -57,13 +58,14 @@ type spendLedger interface {
 }
 
 type Tracker struct {
-	mu         sync.Mutex
-	clock      Clock
-	defaults   Budget
-	budgets    map[string]Budget
-	spendByDay map[string]float64
-	ledger     spendLedger
-	pricer     Pricer
+	mu           sync.Mutex
+	clock        Clock
+	defaults     Budget
+	budgets      map[string]Budget
+	spendByDay   map[string]float64
+	ledger       spendLedger
+	pricer       Pricer
+	reservations map[string]Reservation
 }
 
 type TrackerOptions struct {
@@ -92,12 +94,13 @@ func NewTrackerWithOptions(options TrackerOptions) *Tracker {
 		pricer = StaticPricer{}
 	}
 	return &Tracker{
-		clock:      clock,
-		defaults:   Budget{Daily: options.Cost.DailyBudgetUSD, PerReq: options.Cost.PerRequestBudgetUSD},
-		budgets:    tenantBudgets(options.Cost, options.Tenants),
-		spendByDay: make(map[string]float64),
-		ledger:     options.Ledger,
-		pricer:     pricer,
+		clock:        clock,
+		reservations: make(map[string]Reservation),
+		defaults:     Budget{Daily: options.Cost.DailyBudgetUSD, PerReq: options.Cost.PerRequestBudgetUSD},
+		budgets:      tenantBudgets(options.Cost, options.Tenants),
+		spendByDay:   make(map[string]float64),
+		ledger:       options.Ledger,
+		pricer:       pricer,
 	}
 }
 

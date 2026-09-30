@@ -20,3 +20,10 @@
 - Added inbound proxy API key auth and separate admin API key auth.
 - Persisted daily budget spend to SQLite so restarts do not reset cost state.
 - Added `scripts/demo.sh` to verify auth, redaction, blocking, budgets, audit, and metrics against a local mock provider.
+
+## Unreleased
+
+- Protect provider credentials in transport failures; redact decoded JSON strings.
+- Reserve budgets atomically and retain conservative charges for unknown outcomes.
+- Flush SSE incrementally and persist usage/audit after client cancellation.
+- Reject invalid security configuration and provision a writable container data directory.

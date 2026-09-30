@@ -112,3 +112,23 @@ func TestConfig_ApplyEnv_addsAuthKeysFromEnvironment(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want nil", err)
 	}
 }
+
+func TestRejectsUnsafeConfiguration(t *testing.T) {
+	for _, mutate := range []func(*Config){
+		func(c *Config) { c.Security.PIIMode = "blok" },
+		func(c *Config) { c.Security.ExtraPIIPatterns = []string{"["} },
+		func(c *Config) { c.Cost.DailyBudgetUSD = -1 },
+		func(c *Config) { c.Tenants = []TenantConfig{{ID: " acme "}} },
+		func(c *Config) { c.Auth.AdminAPIKeys = []string{"shared"}; c.Auth.ProxyAPIKeys = []string{"shared"} },
+	} {
+		c := Default()
+		c.Auth.Enabled = false
+		mutate(&c)
+		if c.Validate() == nil {
+			t.Fatal("unsafe configuration accepted")
+		}
+	}
+	if _, err := Load("/definitely-missing-guardrail-test.yaml"); err == nil {
+		t.Fatal("missing explicit config accepted")
+	}
+}
